@@ -59,10 +59,21 @@ AppAudioRecorder 直接從你指定的 App（例如 LINE、Zoom、瀏覽器）�
 
 1. 到 [Releases 頁面](https://github.com/Dennishi0925/AppAudioRecorder/releases/latest) 下載 `AppAudioRecorder-x.x.x.zip`。
 2. 點兩下解壓縮，把 **AppAudioRecorder** 拖到「應用程式」資料夾。
-3. 第一次打開時，macOS 可能會顯示「無法驗證開發者」，這是因為這個 App 沒有向 Apple 付費註冊。請照下面的方式打開：
-   1. 先在「應用程式」資料夾點兩下 AppAudioRecorder，看到警告後按「完成」或「取消」。
-   2. 打開「系統設定 → 隱私權與安全性」，往下捲，找到「已阻擋 AppAudioRecorder」，按 **「強制打開」**（或「仍要打開」）。
-   3. 再確認一次，輸入密碼。之後就可以正常開啟，不會再出現警告。
+3. 第一次打開時，macOS 會跳出警告，說無法確認這個 App 沒有惡意軟體（英文介面顯示：「Apple could not verify "AppAudioRecorder.app" is free of malware…」）。
+
+   **這是正常的，只需要處理一次。** 從網路下載、又沒有向 Apple 付費註冊並送審的 App，macOS 都會先擋下來；這不代表 App 有問題。這個專案的原始碼完全公開，你可以在這個頁面上查看。
+
+   請照下面的步驟打開：
+
+   1. 在警告視窗按 **「完成」**（Done）。**不要**按「丟到垃圾桶」（Move to Trash）。
+   2. 打開 **「系統設定」**（System Settings），左邊選 **「隱私權與安全性」**（Privacy & Security）。
+   3. 往下捲到 **「安全性」**（Security）區塊，會看到一行「已阻擋 "AppAudioRecorder.app" 以保護你的 Mac」（"AppAudioRecorder.app" was blocked to protect your Mac）。
+   4. 按旁邊的 **「強制打開」**（Open Anyway）。
+   5. 會再出現一次警告，這次有 **「強制打開」**（Open Anyway）按鈕，按下去，再輸入電腦的登入密碼。
+
+   完成後就能正常使用，之後打開都不會再出現警告。
+
+   > 找不到第 3 步那一行？先到「應用程式」資料夾點兩下 AppAudioRecorder，讓警告再出現一次，再馬上回到「隱私權與安全性」查看。那一行只會在被擋下後顯示大約一小時。
 
 ### 允許錄音權限
 
