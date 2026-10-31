@@ -28,7 +28,13 @@
 
 ## 它解決什麼問題
 
-用電腦和別人通話時，想把對話錄下來，通常會遇到這些麻煩：
+用電腦和別人通話或開會時，很多時候都必須戴耳機：
+
+- 你在咖啡廳、圖書館或辦公室，不能把聲音放出來。
+- 你在家裡，但不敢開太大聲，怕吵到室友或家人。
+- 電腦喇叭已經開到最大，還是聽不清楚對方在說什麼。
+
+但這時候想把對話錄下來，常見的做法都有問題：
 
 - **戴耳機時，錄音程式錄不到對方**：對方的聲音只進了你的耳朵，麥克風收不到。
 - **開喇叭錄，音質差又有回音**：還會錄到房間雜音。
@@ -61,6 +67,10 @@ AppAudioRecorder 直接從你指定的 App（例如 LINE、Zoom、瀏覽器）�
 2. 點兩下解壓縮，把 **AppAudioRecorder** 拖到「應用程式」資料夾。
 3. 第一次打開時，macOS 會跳出警告，說無法確認這個 App 沒有惡意軟體（英文介面顯示：「Apple could not verify "AppAudioRecorder.app" is free of malware…」）。
 
+   <p align="center">
+     <img src="docs/images/gatekeeper-blocked.jpg" width="260" alt="無法驗證開發者的警告">
+   </p>
+
    **這是正常的，只需要處理一次。** 從網路下載、又沒有向 Apple 付費註冊並送審的 App，macOS 都會先擋下來；這不代表 App 有問題。這個專案的原始碼完全公開，你可以在這個頁面上查看。
 
    請照下面的步驟打開：
@@ -69,6 +79,9 @@ AppAudioRecorder 直接從你指定的 App（例如 LINE、Zoom、瀏覽器）�
    2. 打開 **「系統設定」**（System Settings），左邊選 **「隱私權與安全性」**（Privacy & Security）。
    3. 往下捲到 **「安全性」**（Security）區塊，會看到一行「已阻擋 "AppAudioRecorder.app" 以保護你的 Mac」（"AppAudioRecorder.app" was blocked to protect your Mac）。
    4. 按旁邊的 **「強制打開」**（Open Anyway）。
+
+      <img src="docs/images/gatekeeper-open-anyway.jpg" width="480" alt="隱私權與安全性中的「強制打開」按鈕">
+
    5. 會再出現一次警告，這次有 **「強制打開」**（Open Anyway）按鈕，按下去，再輸入電腦的登入密碼。
 
    完成後就能正常使用，之後打開都不會再出現警告。
