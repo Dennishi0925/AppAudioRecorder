@@ -1,0 +1,24 @@
+# 錄音（私人內容，絕不上傳）
+recordings/
+*.caf
+*.m4a
+*.wav
+session.json
+
+# 建置產物
+.build/
+build/
+*.app
+
+# 本機備份與暫存
+backup/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 憑證與金鑰（萬一放進資料夾）
+*.p12
+*.cer
+*.key
+*.pem
+.env

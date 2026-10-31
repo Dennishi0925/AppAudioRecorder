@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>local.appaudiorecorder</string>
+    <key>CFBundleName</key>
+    <string>AppAudioRecorder</string>
+    <key>CFBundleVersion</key>
+    <string>0.8.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.8.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.4</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>需要擷取其他 App 的聲音,才能把它錄成檔案。</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>需要使用麥克風,才能與 App 的聲音一起分軌錄音。</string>
+</dict>
+</plist>
