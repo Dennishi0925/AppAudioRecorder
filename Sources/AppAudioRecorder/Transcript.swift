@@ -154,6 +154,11 @@ enum TranscriptMaker {
         if choice == .none {
             return finish(TranscriptOutcome(mode: "none", reason: "使用者選擇不需要", file: nil, warnings: [], ok: true))
         }
+        if !fm.fileExists(atPath: appCAF.path) && hasMic {
+            // 這次選了「不錄 App」：只有麥克風軌，直接用 microphone.m4a
+            return finish(TranscriptOutcome(mode: "mic", reason: "這次沒有錄 App，只有麥克風軌", file: "microphone.m4a",
+                                            warnings: [], ok: fm.fileExists(atPath: dir.appendingPathComponent("microphone.m4a").path)))
+        }
         guard fm.fileExists(atPath: appCAF.path) else {
             return finish(TranscriptOutcome(mode: "none", reason: "找不到 capture/app.caf", file: nil,
                                             warnings: ["找不到 App 軌，無法產生逐字稿用檔案"], ok: false))

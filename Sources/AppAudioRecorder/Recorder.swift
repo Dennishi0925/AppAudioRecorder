@@ -60,7 +60,7 @@ final class CaptureWriter {
     private let totalChannels: Int
     private var appFile: AVAudioFile?
     private var micFile: AVAudioFile?
-    private let appPCM: AVAudioPCMBuffer
+    private let appPCM: AVAudioPCMBuffer?
     private let micPCM: AVAudioPCMBuffer?
     private let scratch: UnsafeMutablePointer<Float>
     private let chunk: Int
@@ -86,7 +86,7 @@ final class CaptureWriter {
     private let maxGapRecords = 1000
 
     init(capture: OpaquePointer, appChannels: Int, micChannels: Int, sampleRate: Double,
-         startupWindowSeconds: Double, appURL: URL, micURL: URL?) throws {
+         startupWindowSeconds: Double, appURL: URL?, micURL: URL?) throws {
         let chunk = 4096
         func makeFile(_ url: URL, _ channels: Int) throws -> AVAudioFile {
             let settings: [String: Any] = [
@@ -101,10 +101,16 @@ final class CaptureWriter {
             return try AVAudioFile(forWriting: url, settings: settings,
                                    commonFormat: .pcmFormatFloat32, interleaved: false)
         }
-        let appFile = try makeFile(appURL, appChannels)
-        guard let appPCM = AVAudioPCMBuffer(pcmFormat: appFile.processingFormat,
-                                            frameCapacity: AVAudioFrameCount(chunk)) else {
-            throw AudioError(description: "無法建立 App 軌的寫檔緩衝區")
+        var appFile: AVAudioFile? = nil
+        var appPCM: AVAudioPCMBuffer? = nil
+        if let appURL, appChannels > 0 {
+            let f = try makeFile(appURL, appChannels)
+            guard let b = AVAudioPCMBuffer(pcmFormat: f.processingFormat,
+                                           frameCapacity: AVAudioFrameCount(chunk)) else {
+                throw AudioError(description: "無法建立 App 軌的寫檔緩衝區")
+            }
+            appFile = f
+            appPCM = b
         }
         var micFile: AVAudioFile? = nil
         var micPCM: AVAudioPCMBuffer? = nil
@@ -117,18 +123,20 @@ final class CaptureWriter {
             micFile = f
             micPCM = b
         }
+        let appCh = appFile == nil ? 0 : appChannels
         let micCh = micFile == nil ? 0 : micChannels
+        guard appCh + micCh > 0 else { throw AudioError(description: "App 與麥克風都沒有要錄") }
         self.capture = capture
-        self.appChannels = appChannels
+        self.appChannels = appCh
         self.micChannels = micCh
-        self.totalChannels = appChannels + micCh
+        self.totalChannels = appCh + micCh
         self.appFile = appFile
         self.micFile = micFile
         self.appPCM = appPCM
         self.micPCM = micPCM
         self.chunk = chunk
         self.startupWindowFrames = Int64(sampleRate * startupWindowSeconds)
-        self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: chunk * (appChannels + micCh))
+        self.scratch = UnsafeMutablePointer<Float>.allocate(capacity: chunk * (appCh + micCh))
     }
 
     deinit { scratch.deallocate() }
@@ -231,7 +239,7 @@ final class CaptureWriter {
     private func writeData(_ n: Int) {
         if hasError() { return }   // 已經寫檔失敗：繼續清空 ring 避免卡住，但不再寫入（各檔計數也停止）
         var appPeak: Float = 0, micPeak: Float = 0
-        if let planes = appPCM.floatChannelData {
+        if let appPCM, let planes = appPCM.floatChannelData {
             for c in 0..<appChannels {
                 let dst = planes[c]
                 var src = scratch + c
@@ -257,7 +265,9 @@ final class CaptureWriter {
                 }
             }
         }
-        guard write(appPCM, to: appFile, frames: n, isApp: true, what: "") else { return }
+        if let appPCM {
+            guard write(appPCM, to: appFile, frames: n, isApp: true, what: "") else { return }
+        }
         if let micPCM {
             guard write(micPCM, to: micFile, frames: n, isApp: false, what: "") else { return }
         }
@@ -272,10 +282,12 @@ final class CaptureWriter {
         var remaining = frames
         while remaining > 0 {
             let n = Int(min(remaining, Int64(chunk)))
-            if let planes = appPCM.floatChannelData {
-                for c in 0..<appChannels { planes[c].update(repeating: 0, count: n) }
+            if let appPCM {
+                if let planes = appPCM.floatChannelData {
+                    for c in 0..<appChannels { planes[c].update(repeating: 0, count: n) }
+                }
+                guard write(appPCM, to: appFile, frames: n, isApp: true, what: "補零") else { return }
             }
-            guard write(appPCM, to: appFile, frames: n, isApp: true, what: "補零") else { return }
             if let micPCM {
                 if let planes = micPCM.floatChannelData {
                     for c in 0..<micChannels { planes[c].update(repeating: 0, count: n) }
@@ -331,6 +343,8 @@ struct RecordOptions {
     // 實測：設為 true 時，被錄的 App 沒出聲前整個 aggregate 的 IO（含麥克風）都不會啟動。
     var tapAutoStart = false
     var outputRoot: URL
+    /// false = 不錄 App（只錄麥克風）：不建立 process tap，aggregate 只含麥克風，也不產生 app.caf
+    var recordApp = true
 }
 
 final class SessionRecorder {
@@ -459,7 +473,7 @@ final class SessionRecorder {
         capture = c
         let w = try CaptureWriter(capture: c, appChannels: sessionAppChannels, micChannels: sessionMicChannels,
                                   sampleRate: sampleRate, startupWindowSeconds: startupWindowSeconds,
-                                  appURL: capDir.appendingPathComponent("app.caf"),
+                                  appURL: options.recordApp ? capDir.appendingPathComponent("app.caf") : nil,
                                   micURL: options.mic == nil ? nil : capDir.appendingPathComponent("microphone.caf"))
         writer = w
         w.start()
@@ -477,62 +491,83 @@ final class SessionRecorder {
     /// 建立一段管線：process tap、aggregate device（麥克風＋預設輸出＋tap）、取樣率與緩衝區對應。
     /// 失敗時已建立的物件留給 teardownPipeline() 清理。
     private func buildPipeline(processes: [AudioProcess], mic: AudioDevice?) throws {
-        // 1. process tap：把指定行程的聲音混成立體聲，不靜音原本的輸出
-        let tapDescription = CATapDescription(stereoMixdownOfProcesses: processes.map { $0.object })
-        tapDescription.name = "AppAudioRecorder Tap"
-        tapDescription.muteBehavior = .unmuted
-        tapDescription.isPrivate = true
-        try check(AudioHardwareCreateProcessTap(tapDescription, &tapID), "建立 process tap")
-        tappedPIDs = Set(processes.map { $0.pid })
+        // 1. process tap：把指定行程的聲音混成立體聲，不靜音原本的輸出（不錄 App 時跳過）
+        var tapUUID: String? = nil
+        if options.recordApp {
+            let tapDescription = CATapDescription(stereoMixdownOfProcesses: processes.map { $0.object })
+            tapDescription.name = "AppAudioRecorder Tap"
+            tapDescription.muteBehavior = .unmuted
+            tapDescription.isPrivate = true
+            try check(AudioHardwareCreateProcessTap(tapDescription, &tapID), "建立 process tap")
+            tappedPIDs = Set(processes.map { $0.pid })
 
-        var formatAddr = address(kAudioTapPropertyFormat)
-        var asbd = AudioStreamBasicDescription()
-        var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        try check(AudioObjectGetPropertyData(tapID, &formatAddr, 0, nil, &asbdSize, &asbd), "讀取 tap 格式")
-        let ch = Int(asbd.mChannelsPerFrame)
-        guard ch > 0 else { throw AudioError(description: "tap 回報的聲道數為 0") }
-        if tapChannels == 0 {
-            tapChannels = ch
-        } else if ch != tapChannels {
-            throw RateMismatch(description: "App 聲音的聲道數從 \(tapChannels) 變成 \(ch)，無法接在同一個檔案")
+            var formatAddr = address(kAudioTapPropertyFormat)
+            var asbd = AudioStreamBasicDescription()
+            var asbdSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            try check(AudioObjectGetPropertyData(tapID, &formatAddr, 0, nil, &asbdSize, &asbd), "讀取 tap 格式")
+            let ch = Int(asbd.mChannelsPerFrame)
+            guard ch > 0 else { throw AudioError(description: "tap 回報的聲道數為 0") }
+            if tapChannels == 0 {
+                tapChannels = ch
+            } else if ch != tapChannels {
+                throw RateMismatch(description: "App 聲音的聲道數從 \(tapChannels) 變成 \(ch)，無法接在同一個檔案")
+            }
+            tapRate = asbd.mSampleRate
+            tapUUID = tapDescription.uuid.uuidString
+        } else {
+            tappedPIDs = []
+            guard mic != nil else { throw AudioError(description: "沒有可錄的來源：沒有選 App，麥克風也不在") }
         }
-        tapRate = asbd.mSampleRate
 
-        // 2. 私有 aggregate device：麥克風（若有）＋預設輸出裝置（主時鐘）＋ tap
-        guard let outID = defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice),
-              let out = makeDevice(outID) else {
-            throw AudioError(description: "讀不到預設輸出裝置")
+        // 2. 私有 aggregate device：麥克風（若有）＋預設輸出裝置（主時鐘）＋ tap。
+        //    不錄 App 時只放麥克風，並以麥克風為主時鐘；輸出裝置與錄音無關，換耳機也不需要重建。
+        var out: AudioDevice? = nil
+        if options.recordApp {
+            guard let outID = defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice),
+                  let o = makeDevice(outID) else {
+                throw AudioError(description: "讀不到預設輸出裝置")
+            }
+            out = o
         }
         outputDevice = out
-        clockUID = (options.clock == .mic && mic != nil) ? mic!.uid : out.uid
+        if let out {
+            clockUID = (options.clock == .mic && mic != nil) ? mic!.uid : out.uid
+        } else {
+            clockUID = mic?.uid ?? ""
+        }
 
         var subDeviceList: [[String: Any]] = []
         if let mic {
             subDeviceList.append([kAudioSubDeviceUIDKey: mic.uid,
                                   kAudioSubDeviceDriftCompensationKey: mic.uid != clockUID])
         }
-        if out.uid != mic?.uid {
+        if let out, out.uid != mic?.uid {
             subDeviceList.append([kAudioSubDeviceUIDKey: out.uid,
                                   kAudioSubDeviceDriftCompensationKey: out.uid != clockUID])
         }
-        let aggregateDescription: [String: Any] = [
+        var aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "AppAudioRecorder Aggregate",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceMainSubDeviceKey: clockUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapAutoStartKey: options.tapAutoStart,
             kAudioAggregateDeviceSubDeviceListKey: subDeviceList,
-            kAudioAggregateDeviceTapListKey: [
-                [kAudioSubTapDriftCompensationKey: true,
-                 kAudioSubTapUIDKey: tapDescription.uuid.uuidString]
-            ]
         ]
+        if let tapUUID {
+            aggregateDescription[kAudioAggregateDeviceTapAutoStartKey] = options.tapAutoStart
+            let tapList: [[String: Any]] = [
+                [kAudioSubTapDriftCompensationKey: true,
+                 kAudioSubTapUIDKey: tapUUID]
+            ]
+            aggregateDescription[kAudioAggregateDeviceTapListKey] = tapList
+        }
         try check(AudioHardwareCreateAggregateDevice(aggregateDescription as CFDictionary, &aggregateID),
                   "建立 aggregate device")
 
         // 3. 取樣率：第一段決定整次錄音的取樣率；之後的段落必須相同（不同就嘗試調整）
-        var rate = getFloat64(aggregateID, kAudioDevicePropertyNominalSampleRate) ?? tapRate
+        let micRate = mic?.nominalRate ?? 0
+        let fallbackRate = tapRate > 0 ? tapRate : (micRate > 0 ? micRate : 48_000)
+        var rate = getFloat64(aggregateID, kAudioDevicePropertyNominalSampleRate) ?? fallbackRate
         if sampleRate == 0 {
             sampleRate = rate
         } else if abs(rate - sampleRate) > 0.5 {
@@ -582,7 +617,8 @@ final class SessionRecorder {
 
         // IO callback：只照表搬移與計數，不配置記憶體、不加鎖、不碰磁碟
         let expectedCount = layout.bufferChannels.count
-        let firstApp = layout.appBuffers[0]
+        // 以第一個 App 緩衝區決定 frame 數；不錄 App 時改用第一個麥克風緩衝區
+        let firstApp = layout.appBuffers.first ?? layout.micBuffers.first ?? 0
         let fallbackFrames = bufferFrameSize
         let floatSize = UInt32(MemoryLayout<Float>.size)
         let ticks = hostTicksToSeconds
@@ -732,14 +768,22 @@ final class SessionRecorder {
         for attempt in 1...4 {
             attempts = attempt
             if attempt > 1 { usleep(500_000) }    // 裝置剛插拔時清單可能還在變動
-            let processes = selectProcesses(options.selector, in: listAudioProcesses()).matched
-            if processes.isEmpty {
-                lastError = "被錄的 App 已沒有音訊行程（可能已關閉）"
-                continue
+            var processes: [AudioProcess] = []
+            if options.recordApp {
+                processes = selectProcesses(options.selector, in: listAudioProcesses()).matched
+                if processes.isEmpty {
+                    lastError = "被錄的 App 已沒有音訊行程（可能已關閉）"
+                    continue
+                }
             }
             var mic: AudioDevice? = nil
             if let wanted = options.mic, micLostAt == nil {
                 mic = listDevices().first { $0.uid == wanted.uid && $0.inputChannels == sessionMicChannels }
+            }
+            if !options.recordApp && mic == nil {
+                // 只錄麥克風：麥克風不在就沒有東西可錄，重試幾次後停止（已錄內容保留）
+                lastError = "麥克風「\(options.mic?.name ?? "?")」已斷開，沒有其他來源可以接著錄"
+                continue
             }
             do {
                 try buildPipeline(processes: processes, mic: mic)
@@ -781,7 +825,7 @@ final class SessionRecorder {
                 "attempts": attempts, "fromOutput": oldOutput, "toOutput": outputDevice?.name ?? "?",
                 "microphoneActive": micActive, "processes": processes.map { Int($0.pid) },
             ])
-            addEvent("裝置變動（\(changes.joined(separator: "；"))），已自動接續：輸出改為 \(outputDevice?.name ?? "?")")
+            addEvent("裝置變動（\(changes.joined(separator: "；"))），已自動接續" + (outputDevice.map { "：輸出改為 \($0.name)" } ?? ""))
             // 重建期間記下的變動已經反映在新管線上，丟棄；之後以新管線的狀態為基準重新監看
             _ = takePendingChange()
             lastRebuildUptime = ProcessInfo.processInfo.systemUptime
@@ -803,10 +847,13 @@ final class SessionRecorder {
             "\(f.mSampleRate)Hz \(f.mChannelsPerFrame)ch id\(f.mFormatID) flags\(f.mFormatFlags) \(f.mBitsPerChannel)b"
         }
         var sig: [String: String] = [:]
-        if let id = defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice) {
-            sig["預設輸出裝置"] = getString(id, kAudioDevicePropertyDeviceUID) ?? "\(id)"
-        } else {
-            sig["預設輸出裝置"] = "無"
+        // 不錄 App 時輸出裝置與錄音無關：換耳機、換喇叭不觸發重建
+        if options.recordApp {
+            if let id = defaultDeviceID(kAudioHardwarePropertyDefaultOutputDevice) {
+                sig["預設輸出裝置"] = getString(id, kAudioDevicePropertyDeviceUID) ?? "\(id)"
+            } else {
+                sig["預設輸出裝置"] = "無"
+            }
         }
         if aggregateID != AudioObjectID(kAudioObjectUnknown) {
             sig["aggregate 取樣率"] = "\(getFloat64(aggregateID, kAudioDevicePropertyNominalSampleRate) ?? -1)"
@@ -849,7 +896,7 @@ final class SessionRecorder {
             }
         }
         let system = AudioObjectID(kAudioObjectSystemObject)
-        listen(system, kAudioHardwarePropertyDefaultOutputDevice)
+        if options.recordApp { listen(system, kAudioHardwarePropertyDefaultOutputDevice) }
         listen(system, kAudioHardwarePropertyDevices)
         listen(aggregateID, kAudioDevicePropertyNominalSampleRate)
         listen(aggregateID, kAudioDevicePropertyStreamConfiguration, kAudioObjectPropertyScopeInput)
@@ -931,7 +978,10 @@ final class SessionRecorder {
     /// 並與 aggregate 實際回報的配置比對。規則：子裝置依清單順序排列，tap 排在最後。
     private func resolveLayout(mic: AudioDevice?) throws -> CaptureLayout {
         // aggregate 建立後 stream 可能稍後才出現，最多等約 2 秒
-        let expectedSubs = (mic == nil || outputDevice?.uid == mic?.uid) ? 1 : 2
+        var subUIDs = Set<String>()
+        if let mic { subUIDs.insert(mic.uid) }
+        if let out = outputDevice { subUIDs.insert(out.uid) }
+        let expectedSubs = max(subUIDs.count, 1)
         var actual: [Int] = []
         var subs: [AudioObjectID] = []
         for _ in 0..<20 {
@@ -960,8 +1010,11 @@ final class SessionRecorder {
             }
             expected += streams
         }
-        let tapIndex = expected.count
-        expected.append(tapChannels)
+        var tapIndex: Int? = nil
+        if options.recordApp {
+            tapIndex = expected.count
+            expected.append(tapChannels)
+        }
 
         guard expected == actual else {
             throw AudioError(description: "aggregate 輸入配置與推算不符(推算 \(expected)，實際 \(actual))。為避免錄錯來源，拒絕開始。")
@@ -978,18 +1031,19 @@ final class SessionRecorder {
         guard let formats = inputStreamFormats(aggregateID), formats.count == actual.count else {
             throw AudioError(description: "讀不到 aggregate 輸入 stream 的格式")
         }
-        for b in [tapIndex] + micBuffers where !isInterleavedFloat32(formats[b]) {
+        let appBuffers = tapIndex.map { [$0] } ?? []
+        for b in appBuffers + micBuffers where !isInterleavedFloat32(formats[b]) {
             throw AudioError(description: "緩衝區 #\(b) 不是交錯 32 位元浮點格式(formatID \(formats[b].mFormatID)，flags \(formats[b].mFormatFlags)，\(formats[b].mBitsPerChannel) 位元)")
         }
 
         // 若麥克風與 App 的配置相同，對調也會符合同一份配置，這時只能依排列規則判斷
         let micLayout = micBuffers.map { actual[$0] }
-        let discriminative = mic == nil || micLayout != [tapChannels]
+        let discriminative = mic == nil || tapIndex == nil || micLayout != [tapChannels]
         if !discriminative {
             let warning = "麥克風與 App 聲道配置相同(都是 \(tapChannels) 聲道)，無法由配置本身確認沒有對調；目前依「子裝置在前、tap 在後」的規則對應。建議做一次「只有 App 出聲／只有麥克風出聲」的確認。"
             if !layoutWarnings.contains(warning) { layoutWarnings.append(warning) }
         }
-        return CaptureLayout(bufferChannels: actual, appBuffers: [tapIndex], micBuffers: micBuffers,
+        return CaptureLayout(bufferChannels: actual, appBuffers: appBuffers, micBuffers: micBuffers,
                              expectedLayout: expected, subDevices: subInfo, discriminative: discriminative)
     }
 
@@ -1002,14 +1056,22 @@ final class SessionRecorder {
 
     func startupReport() -> [String] {
         var lines: [String] = []
-        lines.append("取樣率 \(Int(sampleRate)) Hz(tap \(Int(tapRate)) Hz，\(tapChannels) 聲道)")
+        if options.recordApp {
+            lines.append("取樣率 \(Int(sampleRate)) Hz(tap \(Int(tapRate)) Hz，\(tapChannels) 聲道)")
+        } else {
+            lines.append("取樣率 \(Int(sampleRate)) Hz(不錄 App，只錄麥克風)")
+        }
         if let layout {
             let parts = layout.bufferChannels.enumerated().map { "#\($0.offset): \($0.element) 聲道" }
             lines.append("aggregate 輸入緩衝區 \(layout.bufferChannels.count) 個 → \(parts.joined(separator: "、"))")
-            var mapping = "App = #\(layout.appBuffers.map { String($0) }.joined(separator: ","))"
-            if !layout.micBuffers.isEmpty {
-                mapping += "，麥克風 = #\(layout.micBuffers.map { String($0) }.joined(separator: ","))"
+            var parts2: [String] = []
+            if !layout.appBuffers.isEmpty {
+                parts2.append("App = #\(layout.appBuffers.map { String($0) }.joined(separator: ","))")
             }
+            if !layout.micBuffers.isEmpty {
+                parts2.append("麥克風 = #\(layout.micBuffers.map { String($0) }.joined(separator: ","))")
+            }
+            let mapping = parts2.joined(separator: "，")
             lines.append("對應(由配置推算並核對):\(mapping)")
         }
         lines += layoutWarnings.map { "⚠️ " + $0 }
@@ -1051,7 +1113,7 @@ final class SessionRecorder {
         var line = String(format: "%02d:%02d:%02d", elapsed / 3600, (elapsed / 60) % 60, elapsed % 60)
         if let writer {
             let peaks = writer.takeRecentPeaks()
-            line += "  App \(db(peaks.app)) dBFS"
+            if options.recordApp { line += "  App \(db(peaks.app)) dBFS" }
             if options.mic != nil { line += "  麥克風 \(micLostAt == nil ? db(peaks.mic) : " 斷開") dBFS" }
         }
         if let writer {
@@ -1085,6 +1147,7 @@ final class SessionRecorder {
 
     /// 檢查符合條件的行程集合是否改變。新增的行程會在下一次裝置切換重建時納入；目前只記錄。
     func pollProcesses() {
+        guard options.recordApp else { return }
         let current = selectProcesses(options.selector, in: listAudioProcesses()).matched
         let currentPIDs = Set(current.map { $0.pid })
         for p in current where !tappedPIDs.contains(p.pid) && !reportedNewPIDs.contains(p.pid) {
@@ -1166,7 +1229,7 @@ final class SessionRecorder {
             "sampleRate": sampleRate,
             "selector": options.selector,
             "processes": options.processes.map { p -> [String: Any] in ["pid": Int(p.pid), "bundleID": p.bundleID] },
-            "tap": ["sampleRate": tapRate, "channels": tapChannels] as [String: Any],
+            "recordsApp": options.recordApp,
             "tapAutoStart": options.tapAutoStart,
             "clock": ["choice": options.clock.rawValue, "uid": clockUID] as [String: Any],
             "notes": [
@@ -1178,6 +1241,7 @@ final class SessionRecorder {
                 "本版不輸出 WAV 與混音檔。"
             ],
         ]
+        if options.recordApp { json["tap"] = ["sampleRate": tapRate, "channels": tapChannels] as [String: Any] }
         if let startError { json["startError"] = startError }
         json["deviceSwitches"] = deviceSwitches
         if let deviceStopReason { json["deviceStopReason"] = deviceStopReason }
@@ -1215,11 +1279,12 @@ final class SessionRecorder {
 
         if let writer {
             let snap = writer.snapshot()
-            var tracks: [String: Any] = [
-                "app": ["file": "capture/app.caf", "channels": sessionAppChannels,
-                        "framesOnDisk": snap.appFramesOnDisk,
-                        "peakDbfs": snap.appPeak > 0 ? 20 * log10(Double(snap.appPeak)) : -999] as [String: Any]
-            ]
+            var tracks: [String: Any] = [:]
+            if options.recordApp {
+                tracks["app"] = ["file": "capture/app.caf", "channels": sessionAppChannels,
+                                 "framesOnDisk": snap.appFramesOnDisk,
+                                 "peakDbfs": snap.appPeak > 0 ? 20 * log10(Double(snap.appPeak)) : -999] as [String: Any]
+            }
             if options.mic != nil {
                 tracks["microphone"] = ["file": "capture/microphone.caf", "channels": sessionMicChannels,
                                         "framesOnDisk": snap.micFramesOnDisk,

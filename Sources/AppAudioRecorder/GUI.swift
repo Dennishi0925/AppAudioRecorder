@@ -110,6 +110,8 @@ final class RecorderModel: ObservableObject {
 
     @Published var apps: [AudioAppEntry] = []
     @Published var mics: [MicEntry] = []
+    /// 「App」選單裡代表「不錄 App（只錄麥克風）」的值
+    static let noAppID = "__none__"
     @Published var selectedAppID: String = UserDefaults.standard.string(forKey: "selectedAppID") ?? "" {
         didSet { UserDefaults.standard.set(selectedAppID, forKey: "selectedAppID") }
     }
@@ -170,6 +172,17 @@ final class RecorderModel: ObservableObject {
     var selectedApp: AudioAppEntry? { apps.first { $0.id == selectedAppID } }
     var selectedMic: MicEntry? { mics.first { $0.id == selectedMicUID } }
     var recordsMic: Bool { !selectedMicUID.isEmpty }
+    var recordsApp: Bool { selectedAppID != Self.noAppID }
+    /// 兩個都選「不錄」時不能開始
+    var hasSource: Bool { recordsApp || recordsMic }
+    var canStart: Bool { hasSource && (!recordsApp || selectedApp != nil) }
+    /// 結果畫面用：這次會匯出哪些 m4a
+    var exportedFileNames: String {
+        var names: [String] = []
+        if recordsApp { names.append("app.m4a") }
+        if recordsMic { names.append("microphone.m4a") }
+        return names.joined(separator: "、")
+    }
 
     init() {
         refresh()
@@ -183,7 +196,7 @@ final class RecorderModel: ObservableObject {
     func refresh() {
         let newApps = loadAudioApps()
         if newApps != apps { apps = newApps }
-        if selectedApp == nil {
+        if recordsApp && selectedApp == nil {
             selectedAppID = apps.first(where: { $0.isOutputting })?.id ?? apps.first?.id ?? ""
         }
         let newMics = loadMics()
@@ -216,15 +229,25 @@ final class RecorderModel: ObservableObject {
         guard !isBusy else { return }
         errorMessage = nil
         result = nil
-        guard let app = selectedApp else {
-            errorMessage = "請先選擇要錄音的 App。"
+        guard hasSource else {
+            errorMessage = "「App」和「麥克風」不能都選「不錄」，至少要錄一個。"
             return
         }
-        let processes = processesForBundle(app.id, in: listAudioProcesses())
-        guard !processes.isEmpty else {
-            errorMessage = "「\(app.name)」目前沒有向系統註冊音訊。請先讓它播放一次聲音，再按「重新整理」。"
-            return
+        var app: AudioAppEntry? = nil
+        var processes: [AudioProcess] = []
+        if recordsApp {
+            guard let selected = selectedApp else {
+                errorMessage = "請先選擇要錄音的 App。"
+                return
+            }
+            processes = processesForBundle(selected.id, in: listAudioProcesses())
+            guard !processes.isEmpty else {
+                errorMessage = "「\(selected.name)」目前沒有向系統註冊音訊。請先讓它播放一次聲音，再按「重新整理」。"
+                return
+            }
+            app = selected
         }
+        let chosenApp = app, chosenProcesses = processes
         var mic: AudioDevice? = nil
         if recordsMic {
             guard let device = listDevices().first(where: { $0.uid == selectedMicUID && $0.inputChannels > 0 }) else {
@@ -238,12 +261,14 @@ final class RecorderModel: ObservableObject {
             if mic != nil {
                 let granted = await Self.microphoneAccess()
                 if !granted {
-                    self.errorMessage = "沒有麥克風權限。請到「系統設定 → 隱私權與安全性 → 麥克風」允許 AppAudioRecorder，或改選「不錄麥克風」。"
+                    self.errorMessage = self.recordsApp
+                        ? "沒有麥克風權限。請到「系統設定 → 隱私權與安全性 → 麥克風」允許 AppAudioRecorder，或改選「不錄麥克風」。"
+                        : "沒有麥克風權限。請到「系統設定 → 隱私權與安全性 → 麥克風」允許 AppAudioRecorder。"
                     self.phase = .idle
                     return
                 }
             }
-            self.begin(app: app, processes: processes, mic: mic)
+            self.begin(app: chosenApp, processes: chosenProcesses, mic: mic)
         }
     }
 
@@ -255,10 +280,11 @@ final class RecorderModel: ObservableObject {
         }
     }
 
-    private func begin(app: AudioAppEntry, processes: [AudioProcess], mic: AudioDevice?) {
+    private func begin(app: AudioAppEntry?, processes: [AudioProcess], mic: AudioDevice?) {
         let root = URL(fileURLWithPath: (outputPath as NSString).expandingTildeInPath)
-        let options = RecordOptions(selector: "bundle:\(app.id)", processes: processes, mic: mic,
-                                    clock: .output, tapAutoStart: false, outputRoot: root)
+        let options = RecordOptions(selector: app.map { "bundle:\($0.id)" } ?? "", processes: processes, mic: mic,
+                                    clock: .output, tapAutoStart: false, outputRoot: root,
+                                    recordApp: app != nil)
         let r = SessionRecorder(options: options)
         do {
             try r.start()
@@ -295,7 +321,8 @@ final class RecorderModel: ObservableObject {
         }
         result = SessionResult(dir: dir, status: status, exportStatus: nil, lines: lines)
         phase = .exporting
-        let choice = (transcriptChoice == "mic" ? TranscriptMode.mic : .mix)
+        // 只錄一軌時不用合成：逐字稿直接用那一軌（由 TranscriptMaker 依實際檔案判斷）
+        let choice = (transcriptChoice == "mic" || !recordsApp ? TranscriptMode.mic : .mix)
         let appOff = appOffsetDb, micOff = micOffsetDb
         Task {
             let (exportStatus, transcript) = await Task.detached(priority: .userInitiated) {
@@ -449,6 +476,8 @@ struct ContentView: View {
             Form {
                 Section("來源") {
                     Picker("App", selection: $model.selectedAppID) {
+                        Text("不錄 App（只錄麥克風）").tag(RecorderModel.noAppID)
+                        Divider()
                         if model.apps.isEmpty { Text("沒有可錄的 App").tag("") }
                         ForEach(model.apps) { app in
                             HStack {
@@ -459,7 +488,8 @@ struct ContentView: View {
                         }
                     }
                     Picker("麥克風", selection: $model.selectedMicUID) {
-                        Text("不錄麥克風").tag("")
+                        Text("不錄麥克風（只錄 App）").tag("")
+                        Divider()
                         ForEach(model.mics) { mic in
                             Text(mic.menuLabel).tag(mic.id)
                         }
@@ -467,6 +497,10 @@ struct ContentView: View {
                     if let mic = model.selectedMic, mic.isBluetooth {
                         Label("藍牙麥克風可能讓耳機切到通話模式、播放音質下降；建議改用內建、有線或 USB 麥克風。",
                               systemImage: "exclamationmark.triangle")
+                            .font(captionFont).foregroundStyle(.orange)
+                    }
+                    if !model.hasSource {
+                        Label("App 和麥克風都選了「不錄」，至少要錄一個才能開始。", systemImage: "exclamationmark.triangle")
                             .font(captionFont).foregroundStyle(.orange)
                     }
                     HStack {
@@ -479,7 +513,10 @@ struct ContentView: View {
                 .disabled(model.isBusy)
 
                 Section("轉逐字稿用的音檔") {
-                    if model.recordsMic {
+                    if model.recordsMic && !model.recordsApp {
+                        Text("沒有錄 App，轉逐字稿直接用 microphone.m4a。")
+                            .font(captionFont).foregroundStyle(.secondary)
+                    } else if model.recordsMic {
                         Picker("錄完後", selection: $model.transcriptChoice) {
                             Text("合成雙方（戴耳機時）").tag("mix")
                             Text("不合成（開喇叭時）").tag("mic")
@@ -519,7 +556,8 @@ struct ContentView: View {
                 .disabled(model.isBusy)
 
                 Section("音量") {
-                    meterRow("App", level: model.appLevel, peak: model.appPeakHold, active: model.phase == .recording)
+                    meterRow("App", level: model.appLevel, peak: model.appPeakHold,
+                             active: model.phase == .recording && model.recordsApp)
                     meterRow("麥克風", level: model.micLevel, peak: model.micPeakHold,
                              active: model.phase == .recording && model.recordsMic)
                 }
@@ -596,7 +634,7 @@ struct ContentView: View {
                 .tint(model.phase == .recording ? .red : .accentColor)
                 .controlSize(.large)
                 .disabled(model.phase == .starting || model.phase == .stopping || model.phase == .exporting
-                          || (model.phase != .recording && model.selectedApp == nil))
+                          || (model.phase != .recording && !model.canStart))
 
                 Text(formatElapsed(model.elapsed))
                     .font(.system(size: 17 * s, design: .monospaced))
@@ -645,7 +683,7 @@ struct ContentView: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let e = r.exportStatus {
-                Text(e == "done" ? "已匯出 app.m4a\(model.recordsMic ? "、microphone.m4a" : "")"
+                Text(e == "done" ? "已匯出 \(model.exportedFileNames)"
                                  : "M4A 匯出失敗；原始 CAF 已保留，可在終端機用 export 指令重試。")
                     .font(captionFont)
                     .foregroundStyle(e == "done" ? Color.secondary : Color.red)
@@ -688,8 +726,14 @@ struct ContentView: View {
                     }
                 }
                 if r.exportStatus == "done" {
-                    Button("播放 App 軌") {
-                        NSWorkspace.shared.open(r.dir.appendingPathComponent("app.m4a"))
+                    if model.recordsApp {
+                        Button("播放 App 軌") {
+                            NSWorkspace.shared.open(r.dir.appendingPathComponent("app.m4a"))
+                        }
+                    } else {
+                        Button("播放麥克風軌") {
+                            NSWorkspace.shared.open(r.dir.appendingPathComponent("microphone.m4a"))
+                        }
                     }
                 }
             }
