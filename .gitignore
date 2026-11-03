@@ -22,3 +22,6 @@ __pycache__/
 *.key
 *.pem
 .env
+
+# 發布用的壓縮檔（放到 GitHub Releases，不進 git）
+*.zip

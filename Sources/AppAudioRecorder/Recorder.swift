@@ -1222,7 +1222,7 @@ final class SessionRecorder {
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         var json: [String: Any] = [
             "schema": 2,
-            "app": "AppAudioRecorder 0.8.0",
+            "app": "AppAudioRecorder 0.9.0",
             "status": status,
             "container": "CAF",
             "sampleFormat": "float32 interleaved",
